@@ -1,7 +1,10 @@
 from dataset.mslr import MSLR
 import numpy as np
+import os
 from ranking.rank_net.model import RankNet, RankNetPairs
 import torch
+from torch.utils.tensorboard import SummaryWriter
+import utils
 from utils import eval_utils, ml_utils
 
 
@@ -10,6 +13,7 @@ class MslrConfig(object):
     dev_file = "data/mslr-web10k/vali.small.txt"
     test_file = "data/mslr-web10k/vali.small.txt"
     batch_size = 512
+    task_name = "mslr"
 
 
 class TrainingConfig(object):
@@ -19,9 +23,13 @@ class TrainingConfig(object):
     gamma = 0.75
     eval_and_save_every = 5
     ndcg_k_list = [10, 30]
+    log_dir = "exp_log"
 
 
 def run_mslr(model_name, mslr_config=MslrConfig(), training_config=TrainingConfig()):
+    exp_name = utils.get_exp_name(model_name, mslr_config.task_name)
+    writer = SummaryWriter(os.path.join(training_config.log_dir, exp_name))
+
     mslr = MSLR(mslr_config.train_file, mslr_config.dev_file, mslr_config.test_file, mslr_config.batch_size)
     train_loader, train_df, dev_loader, dev_df, test_loader, test_df = mslr.load_data()
     model, model_inference = get_train_inference_model(model_name, train_loader.num_features)
@@ -42,20 +50,28 @@ def run_mslr(model_name, mslr_config=MslrConfig(), training_config=TrainingConfi
         model.zero_grad()
         model.train()
 
-        epoch_loss = pairwise_train_fn(model, loss_op, optimizer, train_loader, device)
-
-        print('Finish training for epoch {}, loss {}'.format(epoch, epoch_loss))
-
-        losses.append(epoch_loss)
+        train_ce_loss = pairwise_train_fn(model, loss_op, optimizer, train_loader, device)
+        print('Finish training for epoch {}'.format(epoch))
+        train_results = {
+            "loss": train_ce_loss
+        }
+        writer.add_scalars("train", train_results, epoch)
+        print(train_results)
+        losses.append(train_ce_loss)
 
         # save to checkpoint every 5 step, and run eval
         if epoch % training_config.eval_and_save_every == 0:
             dev_ce_loss, dev_ndcg_results = eval_model_fn(model_inference, device, dev_df, dev_loader,
                                                           training_config.ndcg_k_list)
+            eval_results = {
+                "loss": dev_ce_loss
+            }
             print("Validation at epoch {}".format(epoch))
-            print("Validation loss: {}".format(dev_ce_loss))
             for k in dev_ndcg_results:
-                print("NDCG@{}: {:.5f}".format(k, dev_ndcg_results[k]))
+                ndcg_at_str = "NDCG@{}".format(k)
+                eval_results[ndcg_at_str] = dev_ndcg_results[k]
+            print(eval_results)
+            writer.add_scalars("eval", eval_results, epoch)
 
     print("Training finished, start testing...")
     test_ce_loss, test_ndcg_results = eval_model_fn(model_inference, device, test_df, test_loader,
